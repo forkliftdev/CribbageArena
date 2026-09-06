@@ -240,8 +240,8 @@ class BaseKimBot(Player):
 
 class KimEasyBot(BaseKimBot):
     """
-    Easy Bot: Uses basic point scoring (keeps pairs, fifteens), avoids 5-leads,
-    and beats Random comfortably, but loses to Medium and Hard.
+    Easy Bot (Smart Beginner): Has common-sense guardrails (never gives 5s or pairs to opponent crib,
+    never leads a 5), but has zero crib synergy and purely reactive pegging.
     """
     def __init__(self, number, verbose=False, verboseFlag=False, *args, **kwargs):
         super().__init__(number, "Easy", verbose=verbose, verboseFlag=verboseFlag)
@@ -249,8 +249,80 @@ class KimEasyBot(BaseKimBot):
     def throwCribCards(self, numCards, gameState):
         isDealer = (gameState['dealer'] == self.number - 1)
         ranked = rankDiscards(self.hand, cribIsMine=isDealer, rng=self.rng)
-        # Sample uniformly from top 8 discards (top half)
-        picked = self.rng.choice(ranked[:8])
+        
+        candidates = ranked[:8]  # top half
+        if not isDealer:
+            # Guardrail: Never throw a 5 into the opponent's crib if any non-5 discard exists!
+            non_five = [r for r in candidates if not any(c.rank == Rank.Five for c in r.discard)]
+            if non_five:
+                candidates = non_five
+            # Avoid gifting pairs to opponent crib if alternative exists
+            non_pair = [r for r in candidates if r.discard[0].rank != r.discard[1].rank]
+            if non_pair:
+                candidates = non_pair
+                
+        picked = self.rng.choice(candidates)
+        for c in picked.discard:
+            self.removeCardFromHand(c)
+        super().createPlayHand()
+        return picked.discard
+
+    def playCard(self, gameState):
+        count = gameState['count']
+        inplay = gameState.get('inplay', [])
+        legal = [c for c in self.playhand if count + c.value() <= 31]
+        if not legal:
+            return None
+
+        # Prefer immediate scoring play if available
+        scoring = []
+        for c in legal:
+            pts = Scoring.scoreCards(inplay + [c], False)
+            scoring.append((c, pts))
+
+        scoring.sort(key=lambda item: item[1], reverse=True)
+        if scoring[0][1] > 0:
+            picked_card = scoring[0][0]
+        else:
+            # Guardrail: NEVER lead a 5 if any non-5 card is legal!
+            if not inplay:
+                non_fives = [c for c in legal if c.rank != Rank.Five]
+                picked_card = self.rng.choice(non_fives) if non_fives else legal[0]
+            else:
+                picked_card = self.rng.choice(legal)
+
+        self.removeCardFromPlayhand(picked_card)
+        return picked_card
+
+
+class KimMediumBot(BaseKimBot):
+    """
+    Medium Bot (Porch Player / Aunt Kim): Plays sensible, friendly cribbage.
+    Discards: Picks from top 4 EV options (50% #1, 30% #2, 10% #3, 10% #4); guards opponent crib.
+    Pegging: Avoids 5-leads, doesn't give away easy 15s/31s; takes 70% #1 / 30% #2 Expectimax plays.
+    """
+    def __init__(self, number, verbose=False, verboseFlag=False, *args, **kwargs):
+        super().__init__(number, "Medium", verbose=verbose, verboseFlag=verboseFlag)
+
+    def throwCribCards(self, numCards, gameState):
+        isDealer = (gameState['dealer'] == self.number - 1)
+        ranked = rankDiscards(self.hand, cribIsMine=isDealer, rng=self.rng)
+        
+        candidates = ranked[:4]
+        if not isDealer:
+            non_five = [r for r in candidates if not any(c.rank == Rank.Five for c in r.discard)]
+            if non_five:
+                candidates = non_five
+
+        r = self.rng.random()
+        if r < 0.50 or len(candidates) == 1:
+            picked = candidates[0]
+        elif r < 0.80 and len(candidates) > 1:
+            picked = candidates[1]
+        elif r < 0.90 and len(candidates) > 2:
+            picked = candidates[2]
+        else:
+            picked = candidates[-1]
 
         for c in picked.discard:
             self.removeCardFromHand(c)
@@ -259,34 +331,33 @@ class KimEasyBot(BaseKimBot):
 
     def playCard(self, gameState):
         count = gameState['count']
+        inplay = gameState.get('inplay', [])
         legal = [c for c in self.playhand if count + c.value() <= 31]
         if not legal:
             return None
 
-        # Prefer immediate scoring play if available, otherwise pick random legal card
-        scoring = []
-        for c in legal:
-            newStack = gameState.get('inplay', []) + [c]
-            pts = Scoring.scoreCards(newStack, False)
-            scoring.append((c, pts))
+        unseen = _unseen_relative_to(self.playhand + inplay)
+        sampled = self.rng.sample(unseen, min(len(unseen), 6)) if unseen else []
+        ranked = rankPeggingPlays(legal, inplay, sampled)
 
-        scoring.sort(key=lambda item: item[1], reverse=True)
-        if scoring[0][1] > 0:
-            picked_card = scoring[0][0]
+        # 70% #1 pick, 30% #2 pick
+        if len(ranked) > 1 and self.rng.random() < 0.30:
+            picked_card = ranked[1].card
         else:
-            picked_card = self.rng.choice(legal)
+            picked_card = ranked[0].card
 
         self.removeCardFromPlayhand(picked_card)
         return picked_card
 
 
-class KimMediumBot(BaseKimBot):
+class KimHardBot(BaseKimBot):
     """
-    Medium Bot (GMed): Calibrated to 65% optimal discards (picks from top 3)
-    and 65% optimal expectimax pegging plays.
+    Hard Bot (Club Player - formerly GMedium):
+    Discards: 65% #1, 25% #2, 10% #3 from Colvert Par-Hole EV.
+    Pegging: 65% #1, 35% #2 Expectimax pegging with Card Range Deduction.
     """
     def __init__(self, number, verbose=False, verboseFlag=False, *args, **kwargs):
-        super().__init__(number, "Medium", verbose=verbose, verboseFlag=verboseFlag)
+        super().__init__(number, "Hard", verbose=verbose, verboseFlag=verboseFlag)
 
     def throwCribCards(self, numCards, gameState):
         isDealer = (gameState['dealer'] == self.number - 1)
@@ -324,64 +395,11 @@ class KimMediumBot(BaseKimBot):
 
         posEval = PositionalEvaluation(myScore, oppScore, isDealer)
         unseen = _unseen_relative_to(self.playhand + gameState.get('inplay', []))
-        sampled_unseen = self.rng.sample(unseen, min(len(unseen), 6)) if unseen else []
+        sampled_unseen = self.rng.sample(unseen, min(len(unseen), 8)) if unseen else []
         ranked = rankPeggingPlays(legal, gameState.get('inplay', []), sampled_unseen, playerScore=myScore, posEval=posEval)
 
         # 65% top pick, 35% 2nd pick
         if len(ranked) > 1 and self.rng.random() < 0.35:
-            picked = ranked[1]
-        else:
-            picked = ranked[0]
-
-        self.removeCardFromPlayhand(picked.card)
-        return picked.card
-
-
-class KimHardBot(BaseKimBot):
-    """
-    Hard Bot (GHard): Calibrated to 85% optimal discards and 85% optimal expectimax pegging.
-    """
-    def __init__(self, number, verbose=False, verboseFlag=False, *args, **kwargs):
-        super().__init__(number, "Hard", verbose=verbose, verboseFlag=verboseFlag)
-
-    def throwCribCards(self, numCards, gameState):
-        isDealer = (gameState['dealer'] == self.number - 1)
-        scores = gameState.get('scores', [0, 0])
-        myScore = scores[self.number - 1] if self.number <= len(scores) else 0
-        oppScore = scores[1 - (self.number - 1)] if len(scores) > 1 else 0
-
-        posEval = PositionalEvaluation(myScore, oppScore, isDealer)
-        ranked = rankDiscards(self.hand, cribIsMine=isDealer, rng=self.rng, posEval=posEval)
-        
-        # 85% #1 pick, 15% #2 pick
-        if len(ranked) > 1 and self.rng.random() < 0.15:
-            picked = ranked[1]
-        else:
-            picked = ranked[0]
-
-        for c in picked.discard:
-            self.removeCardFromHand(c)
-        super().createPlayHand()
-        return picked.discard
-
-    def playCard(self, gameState):
-        count = gameState['count']
-        legal = [c for c in self.playhand if count + c.value() <= 31]
-        if not legal:
-            return None
-
-        isDealer = (gameState['dealer'] == self.number - 1)
-        scores = gameState.get('scores', [0, 0])
-        myScore = scores[self.number - 1] if self.number <= len(scores) else 0
-        oppScore = scores[1 - (self.number - 1)] if len(scores) > 1 else 0
-
-        posEval = PositionalEvaluation(myScore, oppScore, isDealer)
-        unseen = _unseen_relative_to(self.playhand + gameState.get('inplay', []))
-        sampled_unseen = self.rng.sample(unseen, min(len(unseen), 8)) if unseen else []
-        ranked = rankPeggingPlays(legal, gameState.get('inplay', []), sampled_unseen, playerScore=myScore, posEval=posEval)
-
-        # 85% top pick, 15% 2nd pick
-        if len(ranked) > 1 and self.rng.random() < 0.15:
             picked = ranked[1]
         else:
             picked = ranked[0]
