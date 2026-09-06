@@ -29,16 +29,14 @@ from math import factorial
 # These functions score a given hand and starter card.
 def getScore(hand, starter, verbose):
     pips = 0
-    # Check scoring where the starter card matters
     pips += checkNobs(hand, starter, verbose)
     pips += checkFlush(hand, starter, verbose)
-    # Check scoring where the starter card is irrelevant
-    hand = hand + [starter]
-    pips += checkPairs(hand, verbose)
-    for numCards in range(2, len(hand) + 1):
-        for combination in combinations(hand, numCards):
+    hand_full = hand + [starter]
+    pips += checkPairs(hand_full, verbose)
+    for numCards in range(2, len(hand_full) + 1):
+        for combination in combinations(hand_full, numCards):
             pips += checkSum(combination, 15, verbose)
-    pips += checkRuns(hand, verbose)
+    pips += checkRuns(hand_full, verbose)
     return pips
 
 def checkPairs(hand, verbose):
